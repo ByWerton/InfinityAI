@@ -1,0 +1,759 @@
+İmport React, { useState, useEffect, useRef } from 'react';
+import { Send, Code, Image as ImageIcon, Sparkles, X, Play, Copy, Zap, Cpu, ArrowLeft, Camera, Download, Film } from 'lucide-react';
+
+// --- Yardımcı Fonksiyonlar ---
+
+// Sadece tarayıcıda çalıştırılabilir (HTML, JS/CSS ile sarmalanmış) kodu döndürür.
+const extractCode = (content) => {
+  // LaTeX dahil olmayan tüm kod bloklarını ara
+  const codeBlockRegex = /```(html|jsx|javascript|js|css|typescript|ts)\n([\s\S]*?)```/g;
+  let match;
+  let webCode = null;
+
+  // Tüm kod bloklarını tarar
+  while ((match = codeBlockRegex.exec(content)) !== null) {
+    const language = match[1];
+    const code = match[2].trim();
+
+    // Öncelik: HTML veya JSX (Tek dosya web kodu)
+    if (language === 'html' || language === 'jsx') {
+      return code; 
+    } 
+    // İkincil öncelik: JS/CSS.
+    if (['javascript', 'js', 'css', 'ts', 'typescript'].includes(language)) {
+        webCode = `<html><head><script src="https://cdn.tailwindcss.com"></script><style>html, body { margin: 0; padding: 0; height: 100%; }</style></head><body><script>${code}</script></body></html>`;
+    }
+  }
+  
+  // Eğer sadece JS/CSS bulunduysa, onu sarılmış olarak döndür.
+  return webCode;
+};
+
+// Yanıttaki İLK kod bloğunun dilini ve ham içeriğini döndürür (Kopyalama için kullanılır).
+const getPrimaryCodeBlock = (content) => {
+    // Regex, dilden bağımsız olarak ilk kod bloğunu yakalar
+    const codeBlockRegex = /```(\w+)\n([\s\S]*?)```/g;
+    const match = codeBlockRegex.exec(content);
+    
+    if (match) {
+        const language = match[1].toLowerCase();
+        const code = match[2].trim();
+        // Basitlik için ilkini alalım.
+        return { language, code };
+    }
+    return null;
+};
+
+
+// --- Ana Uygulama Bileşeni ---
+
+export default function InfinityAIStudio() {
+  const [messages, setMessages] = useState([
+    { id: 1, role: 'system', content: 'Merhaba! Ben **InfinityAI**. Mod seçimi güncellendi. Artık **Canvas** modunda isteyeceğiniz **herhangi bir dilin** (Python, Java, C#, vb.) görselleştirilebilir çıktısını otomatik olarak HTML/JavaScript\'e çevirip önizleme yapabilirim.', type: 'text' }
+  ]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [currentCode, setCurrentCode] = useState('');
+  const [selectedMode, setSelectedMode] = useState('canvas'); 
+  const [currentStep, setCurrentStep] = useState(''); 
+  const [copyMessage, setCopyMessage] = useState(''); 
+  
+  // Yeni durum: En son yapay zeka yanıtındaki kopyalanabilir kod bloğu bilgisi
+  const [primaryCodeInfo, setPrimaryCodeInfo] = useState(null); 
+  // YENİ DURUM: Mod seçici açılıp açılmadığı
+  const [showModeSelector, setShowModeSelector] = useState(false);
+
+  // Resim Analizi için Yeni Durumlar (Vision)
+  const [imageUrl, setImageUrl] = useState(null); // Önizleme için URL
+  const [imageData, setImageData] = useState(null); // Base64 Verisi
+  const [imageMimeType, setImageMimeType] = useState(null); // MIME Tipi
+
+  // API Anahtarı Boş Bırakıldı
+  const GEMINI_API_KEY = ''; 
+
+  const chatContainerRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const logoUrl = 'https://raw.githubusercontent.com/ByWerton/InfinityAI/refs/heads/main/1764172777146.png';
+
+  // Mod listesi (Video Modu Eklendi)
+  const modes = ['canvas', 'derin_arastirma', 'tek_sefer', 'resim', 'video'];
+  
+  const handleModeSelect = (mode) => {
+    setSelectedMode(mode);
+    setShowModeSelector(false); // Seçim yapıldıktan sonra kapat
+    setShowPreview(false);
+    setPrimaryCodeInfo(null);
+    clearImage(); // Mod değiştiğinde resmi de temizle
+  };
+  
+  const getModeLabel = (mode) => {
+      switch (mode) {
+          case 'canvas': return 'Canvas (Çekirdek + Çeviri)';
+          case 'derin_arastirma': return 'Derin Araştırma (10 Adım)';
+          case 'tek_sefer': return 'Tek Sefer (Hızlı)';
+          case 'resim': return 'Resim Çiz (Imagen 4.0)';
+          case 'video': return 'Video Oluştur (Simülasyon)'; // YENİ
+          default: return 'Bilinmiyor';
+      }
+  };
+
+  // Scroll to bottom
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [messages]);
+  
+  // Resim Temizleme
+  const clearImage = () => {
+    setImageUrl(null);
+    setImageData(null);
+    setImageMimeType(null);
+    if (fileInputRef.current) {
+        fileInputRef.current.value = null; // Dosya girişini de sıfırla
+    }
+  };
+  
+  // Resim Yükleme ve Base64 Dönüşümü
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        // Base64 verisini ve MIME tipini kaydet
+        const base64String = reader.result.split(',')[1];
+        setImageUrl(reader.result);
+        setImageData(base64String);
+        setImageMimeType(file.type);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Copy Code Function (Uses document.execCommand for iFrame compatibility)
+  const copyCodeToClipboard = (rawCode, lang) => {
+    const textarea = document.createElement('textarea');
+
+    textarea.value = rawCode;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+        document.execCommand('copy');
+        const languageName = lang ? lang.toUpperCase() : 'KOD';
+        setCopyMessage(`${languageName} kodu başarıyla panoya kopyalandı!`);
+    } catch (err) {
+        setCopyMessage('Kopyalama başarısız oldu.');
+    }
+    document.body.removeChild(textarea);
+
+    setTimeout(() => setCopyMessage(''), 3000);
+  };
+
+
+  // --- API Çağrısı (Vision Desteğiyle) ---
+
+  const callGemini = async (prompt, modelOverride = 'gemini-2.5-flash-preview-09-2025', imagePayload = null) => {
+    
+    let delay = 1000; 
+    const maxRetries = 5;
+
+    // Payload'u oluşturma (Vision destekli)
+    const contents = [{ 
+      parts: [
+        { text: prompt },
+        ...(imagePayload ? [{ 
+          inlineData: {
+            mimeType: imagePayload.mimeType,
+            data: imagePayload.data
+          }
+        }] : [])
+      ]
+    }];
+    
+    const apiBody = JSON.stringify({ contents: contents });
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelOverride}:generateContent?key=${GEMINI_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: apiBody
+        });
+        
+        const data = await response.json();
+        
+        if (response.status === 429) { 
+          if (attempt < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2; 
+            continue; 
+          } else {
+            throw new Error('Hata 429: ElevenGalaxy limitini aştınız. Lütfen daha sonra tekrar deneyin.');
+          }
+        }
+        
+        if (data.error) throw new Error(data.error.message || `InfinityAI API Hatası: ${response.status}`);
+        
+        return data.candidates[0].content.parts[0].text;
+        
+      } catch (error) {
+        if (attempt < maxRetries - 1) {
+           await new Promise(resolve => setTimeout(resolve, delay));
+           delay *= 2;
+           continue; 
+        }
+        throw error;
+      }
+    }
+    throw new Error("API çağrısı tüm denemelerde başarısız oldu.");
+  };
+
+  // --- İteratif Analiz İşlemi (10 Aşamalıya kadar) ---
+  const runFourStepAnalysis = async (userPrompt, isCodeMode, imagePayload = null) => {
+    let currentResponse = '';
+    
+    // Güvenlik için belirlenen maksimum adım sayısı (Kullanıcının isteği: 4 yetmezse devam etsin)
+    const maxSteps = 10; 
+    
+    // Modelin iteratif olarak kendini iyileştirmesi için temel talimat
+    const iterativeInstructionBase = "Önceki yanıtı analiz et ve kullanıcının isteğini tam ve mükemmel bir şekilde yerine getirene kadar iyileştirme, hata giderme ve eksiksiz hale getirme sürecine devam et. YAPILMADI VEYA BAŞARISIZ OLDU gibi olumsuz kelimeler KULLANMA. Her zaman nihai sonuca ulaşıyormuş gibi İLERLE.";
+
+    const apiModelName = 'gemini-2.5-flash-preview-09-2025';
+
+    // Yeni ve güçlendirilmiş HTML Çıktı Talimatı (Sadece Canvas Modunda)
+    const htmlOutputMandate = `
+        Kullanıcının isteği bir programlama dili çıktısı gerektiriyorsa (Python, Java, C#, vb.), her zaman iki ayrı kod bloğu döndürmelisin: 
+        1) İstenen dildeki (**ÇEKİRDEK MANTIK**) kodu. 
+        2) Bu çekirdek mantığın tarayıcıda görselleştirilebileceği, Canvas Önizleme için hazır **HTML, JavaScript ve CSS** içeren TEK bir kod bloğu. 
+        **ÖNEMLİ:** Eğer kullanıcı görselleştirme istemese bile, 'canvas' modu etkin olduğu sürece, çalıştırılabilir HTML/JavaScript/CSS içeren bir Canvas önizleme kodu **MUTLAKA** oluşturulmalıdır.
+    `;
+
+    for (let i = 0; i < maxSteps; i++) {
+        let stepPrompt;
+        let instruction;
+
+        // Adım 4 (i=3) hedef teslimat adımıdır.
+        if (i === 3) {
+            instruction = "4. ADIM (Hedef Teslimat): Bu, kullanıcının isteğinin **mükemmel ve eksiksiz** teslimatı olmalıdır. Eğer sonuçtan eminsen, bu çıktıyı ver ve sonraki adımları atla. Aksi takdirde, daha fazla iyileştirme için sonraki adımlara devam et."
+        } else if (i === maxSteps - 1) {
+            instruction = "SON ADIM: Bu, kullanıcının isteğinin **MÜKEMMEL, EKSİKSİZ VE DOĞRUDAN** teslimatıdır. SON ÇIKTIYI GÖSTER, açıklamaları veya ara adımları atla. Sorun çözülmüş ve teslim edilmiş gibi davran."
+        } else if (i > 3) {
+             instruction = `Genişletilmiş İyileştirme Adımı (${i + 1}/${maxSteps}): ${iterativeInstructionBase} Üstün bir sonuç için devam ediliyor.`;
+        } else {
+            instruction = `(${i + 1}/${maxSteps} İyileştirme Adımı): ${iterativeInstructionBase}`;
+        }
+
+
+        if (isCodeMode) {
+            const codeOutputInstruction = htmlOutputMandate; // Güçlendirilmiş talimat
+
+            stepPrompt = i === 0
+                ? `Kullanıcının isteği: "${userPrompt}". ${instruction} ${codeOutputInstruction}`
+                : `Kullanıcının orijinal isteği: "${userPrompt}". Önceki adımda üretilen kod taslağı: "${currentResponse}". Lütfen bu kodu değerlendir ve aşağıdaki görevi yerine getir. ${instruction} ${codeOutputInstruction}`;
+        } else {
+            // Metin Modu (Derin Araştırma)
+            stepPrompt = i === 0
+                ? userPrompt
+                : `Kullanıcının orijinal isteği: "${userPrompt}". Önceki adımda üretilen yanıt: "${currentResponse}". Lütfen bu yanıtı değerlendir ve aşağıdaki görevi yerine getir. ${instruction}`;
+        }
+        
+        setCurrentStep(`Adım ${i + 1}/${maxSteps}: ${i === maxSteps - 1 ? "Nihai Teslimat Hazırlanıyor" : "Çıktı İyileştiriliyor..."}`);
+        
+        // Yalnızca ilk adımda görsel veriyi (varsa) gönder.
+        const stepResult = await callGemini(stepPrompt, apiModelName, i === 0 ? imagePayload : null);
+        currentResponse = stepResult;
+        
+        if (i === maxSteps - 1) {
+             // 10. adıma ulaşıldı, nihai çıktıyı ver
+             break;
+        }
+
+    }
+    
+    return currentResponse;
+  };
+
+  // --- Mesaj Gönderme Mantığı ---
+
+  const handleSend = async () => {
+    if (!input.trim() && !imageData) return; // Metin veya resim yoksa gönderme
+
+    const userMsg = { id: Date.now(), role: 'user', content: input, type: 'text' };
+    setMessages(prev => [...prev, userMsg]);
+    setInput('');
+    setIsLoading(true);
+    setCurrentStep('');
+    setPrimaryCodeInfo(null); 
+    setShowModeSelector(false); // Gönderimde mod seçiciyi kapat
+
+    const usedModelName = 'InfinityAI Tech';
+    const imagePayload = imageData ? { data: imageData, mimeType: imageMimeType } : null;
+    
+    // Resim Çiz Modu hariç, resim gönderildikten sonra temizle.
+    if (selectedMode !== 'resim') {
+        clearImage(); 
+    }
+
+    try {
+      if (selectedMode === 'resim') {
+        setCurrentStep('Görsel üretimi için model (Imagen 4.0) çağrılıyor...');
+        
+        const userPrompt = userMsg.content;
+        let delay = 1000;
+        const maxRetries = 5;
+        let base64Data = null;
+        const IMAGEN_MODEL = 'imagen-4.0-generate-001';
+        
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                // IMAGEN API ÇAĞRISI İÇİN ÖZEL YÜK (PAYLOAD)
+                const imagenPayload = { instances: { prompt: userPrompt }, parameters: { "sampleCount": 1} };
+                
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${IMAGEN_MODEL}:predict?key=${GEMINI_API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(imagenPayload)
+                });
+                
+                const data = await response.json();
+
+                if (response.status === 429) {
+                    if (attempt < maxRetries - 1) {
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2;
+                        continue;
+                    } else {
+                        throw new Error('Hata 429: ElevenGalaxy limitini aştınız. Lütfen daha sonra tekrar deneyin.');
+                    }
+                }
+                
+                if (data.error) throw new Error(data.error.message || `Imagen API Hatası: ${response.status}`);
+                
+                // Base64 verisini çekme
+                if (data.predictions && data.predictions.length > 0 && data.predictions[0].bytesBase64Encoded) {
+                    base64Data = data.predictions[0].bytesBase64Encoded;
+                } else {
+                    throw new Error("Imagen modeli görsel verisi döndürmedi.");
+                }
+                
+                break; // Başarılı, döngüden çık
+                
+            } catch (error) {
+                 if (attempt < maxRetries - 1) {
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2;
+                    continue;
+                }
+                throw error; // Tüm denemeler başarısız olursa hatayı yeniden fırlat
+            }
+        }
+        
+        if (base64Data) {
+            const imageUrl = `data:image/png;base64,${base64Data}`;
+            const botMsg = { id: Date.now() + 1, role: 'ai', content: imageUrl, type: 'image', model: `Imagen 4.0 (DALL-E Alternatifi)` };
+            setMessages(prev => [...prev, botMsg]);
+        } else {
+             throw new Error("Görsel oluşturulamadı veya boş veri döndü.");
+        }
+        
+        clearImage(); // Resim oluşturulduktan sonra temizle
+        
+      } else if (selectedMode === 'video') {
+        // VİDEO OLUŞTURMA MODU (Simülasyon)
+        setCurrentStep('Video Oluşturma Modu: Video ve ses içeriği hazırlanıyor (Simülasyon)...');
+        
+        // Simülasyon Gecikmesi
+        await new Promise(resolve => setTimeout(resolve, 3000)); 
+        
+        const prompt = userMsg.content;
+        // İstenen uzunluğu prompt'tan çıkarmaya çalış
+        const durationMatch = prompt.match(/(\d+)\s*(saniye|sn|second|s|dk|minute|m)/i);
+        const duration = durationMatch ? `${durationMatch[1]} ${durationMatch[2]}` : '30 saniye';
+        
+        const botMsgContent = `
+            Video Modu Sonucu:
+            
+            **İstek:** "${prompt}"
+            **Tahmini Süre:** ${duration}
+            
+            Maalesef, API şu anda doğrudan video oluşturmayı desteklemiyor. Ancak, isteğinizin görsel ve işitsel çıktısı başarıyla simüle edildi ve aşağıda bir video oynatıcı placeholder'ı sunulmuştur.
+            
+            \`\`\`html:Video Oynatıcı Placeholder:video_player.html
+            <!DOCTYPE html>
+            <html lang="tr">
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Video Oluşturma Simülasyonu</title>
+              <script src="https://cdn.tailwindcss.com"></script>
+              <style>
+                @keyframes pulse-ring {
+                    0% { transform: scale(0.3); opacity: 0.8; }
+                    100% { transform: scale(1.5); opacity: 0; }
+                }
+                .pulse-animation {
+                    animation: pulse-ring 1.5s infinite;
+                }
+              </style>
+            </head>
+            <body class="bg-gray-950 flex items-center justify-center h-screen p-4">
+              <div class="flex flex-col items-center justify-center w-full max-w-lg bg-gray-900 text-white p-8 rounded-xl shadow-2xl border border-red-700">
+                <h1 class="text-3xl font-extrabold mb-6 text-red-500 tracking-wider">InfinityAI Video</h1>
+                <div class="relative w-full aspect-video bg-black rounded-lg shadow-inner overflow-hidden flex items-center justify-center border-4 border-red-600">
+                  <div class="relative flex items-center justify-center w-full h-full">
+                    <!-- Audio Pulse Simulation -->
+                    <span class="absolute inline-flex h-full w-full bg-red-800 rounded-full opacity-75 pulse-animation"></span>
+                    <span class="relative inline-flex rounded-full h-12 w-12 bg-red-600 items-center justify-center">
+                       <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-film"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7h18"/><path d="M3 17h18"/><path d="M17 3v18"/></svg>
+                    </span>
+                  </div>
+                </div>
+                <p class="text-lg mt-5 font-semibold text-center text-gray-300">Konu: ${prompt.substring(0, 70)}...</p>
+                <p class="text-sm text-center text-red-400 mt-2">İstenen Süre: ${duration}</p>
+                <p class="mt-6 text-xs text-gray-500 bg-gray-800 p-2 rounded-lg w-full text-center">Bu, video oluşturma yeteneğinin bir simülasyonudur. Gerçek video dosyası üretilememiştir.</p>
+              </div>
+            </body>
+            </html>
+            \`\`\`
+        `;
+        
+        const botMsg = { id: Date.now() + 1, role: 'ai', content: botMsgContent, type: 'text', model: `InfinityAI Video Modu (Simülasyon)` };
+        setMessages(prev => [...prev, botMsg]);
+
+        // Kod bloğunu önizlemeye koy ve otomatik aç
+        setCurrentCode(extractCode(botMsgContent));
+        setShowPreview(true);
+
+
+      } else if (selectedMode === 'canvas') {
+        // CANVAS (10 Aşamalı Kod Üretimi - Vision Destekli)
+        const responseContent = await runFourStepAnalysis(userMsg.content, true, imagePayload);
+        
+        const extractedHTML = extractCode(responseContent); // Çalıştırılabilir web kodu (Preview için)
+        const primaryCode = getPrimaryCodeBlock(responseContent); // Ham kod bloğu bilgisi (Copy için)
+
+        if (extractedHTML) {
+            setCurrentCode(extractedHTML);
+            setShowPreview(true); 
+        } else {
+            setCurrentCode(''); 
+            setShowPreview(false); 
+        }
+        
+        setPrimaryCodeInfo(primaryCode); 
+        
+        const botMsg = { id: Date.now() + 1, role: 'ai', content: responseContent, type: 'text', model: `${usedModelName} (4+ Aşamalı Kod)` };
+        setMessages(prev => [...prev, botMsg]);
+        
+
+      } else if (selectedMode === 'derin_arastirma') {
+        // DERİN ARAŞTIRMA (10 Aşamalı - Vision Destekli)
+        const responseContent = await runFourStepAnalysis(userMsg.content, false, imagePayload);
+        
+        const botMsg = { id: Date.now() + 1, role: 'ai', content: responseContent, type: 'text', model: `${usedModelName} (4+ Aşamalı Araştırma)` };
+        setMessages(prev => [...prev, botMsg]);
+
+      } else { // 'tek_sefer' (Hızlı Tek Aşamalı Yanıt - Vision Destekli)
+        setCurrentStep('InfinityAI yanıt oluşturuyor...');
+        const responseContent = await callGemini(userMsg.content, 'gemini-2.5-flash-preview-09-2025', imagePayload);
+
+        const botMsg = { id: Date.now() + 1, role: 'ai', content: responseContent, type: 'text', model: usedModelName };
+        setMessages(prev => [...prev, botMsg]);
+      }
+
+    } catch (error) {
+      setMessages(prev => [...prev, {
+        id: Date.now() + 1,
+        role: 'system',
+        content: `Ciddi Hata Oluştu: ${error.message}. Servis Sağlayıcı: ElevenGalaxy`,
+        type: 'error'
+      }]);
+    } finally {
+      setIsLoading(false);
+      setCurrentStep(''); 
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-screen bg-gray-950 text-gray-100 font-sans overflow-hidden">
+      
+      {/* Header */}
+      <div className="flex justify-between items-center p-4 bg-gray-900 border-b border-red-700">
+        <div className="flex items-center gap-3 text-red-500">
+          <img src={logoUrl} alt="InfinityAI Logo" className="w-8 h-8 rounded-full shadow-lg border border-red-500" />
+          <h1 className="text-xl font-bold tracking-wider">InfinityAI</h1>
+        </div>
+        
+        {/* Code Preview Controls (Kodu Kopyala & Önizlemeyi Kapat) */}
+        {!showPreview && primaryCodeInfo && (
+            <div className="flex items-center gap-2">
+                <button 
+                    onClick={() => copyCodeToClipboard(primaryCodeInfo.code, primaryCodeInfo.language)}
+                    className="flex items-center gap-2 p-2 text-gray-300 hover:text-white hover:bg-red-700 rounded-lg transition-colors border border-gray-700"
+                >
+                    <Copy size={20} />
+                    <span>{primaryCodeInfo.language.toUpperCase()} Çekirdek Kodunu Kopyala</span>
+                </button>
+            </div>
+        )}
+      </div>
+      
+      {/* Copy Message Popup */}
+      {copyMessage && (
+          <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow-xl text-white ${
+              copyMessage.includes('başarıyla') ? 'bg-green-600' : 'bg-red-600'
+          } transition-opacity duration-500`}>
+              {copyMessage}
+          </div>
+      )}
+
+      {/* Main Chat Area / Full Preview */}
+      <div className="flex-1 flex flex-row relative overflow-hidden">
+        
+        {/* Chat Log: Tam ekran önizleme varsa gizle */}
+        <div 
+            className={`flex-1 flex flex-col overflow-y-auto p-6 space-y-6 transition-all duration-300 ${showPreview ? 'hidden' : 'w-full'}`} 
+            ref={chatContainerRef}
+        >
+          {messages.map((msg) => (
+            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] rounded-2xl p-4 shadow-xl ${
+                msg.role === 'user' 
+                  ? 'bg-red-700 text-white rounded-br-none' 
+                  : msg.type === 'error' 
+                    ? 'bg-black border border-red-500 text-red-300'
+                    : 'bg-gray-900 border border-gray-800 text-gray-100 rounded-bl-none'
+              }`}>
+                {msg.role === 'ai' && (
+                  <div className="flex items-center gap-2 mb-2 text-xs font-mono text-red-400 opacity-75">
+                    <img src={logoUrl} alt="AI Logo" className="w-4 h-4 rounded-full" />
+                    <span>{msg.model}</span>
+                  </div>
+                )}
+                
+                {msg.type === 'image' ? (
+                  <div className="rounded-lg overflow-hidden border border-gray-700">
+                    <img 
+                        src={msg.content} 
+                        alt="Generated AI" 
+                        className="w-full h-auto max-w-md object-contain" 
+                        onError={(e) => e.target.src = "https://placehold.co/512x512/7c0a0a/ffffff?text=GÖRSEL+OLUŞTURULAMADI"}
+                    />
+                    {/* YENİ: İndirme Düğmesi */}
+                    <a 
+                      href={msg.content} 
+                      download="infinityai_image.png" 
+                      className="block text-center text-xs p-2 bg-red-600 hover:bg-red-500 text-white font-bold transition-colors"
+                    >
+                      <div className="flex items-center justify-center gap-2">
+                        <Download size={14} />
+                        Görseli İndir (.png)
+                      </div>
+                    </a>
+                  </div>
+                ) : (
+                  <div className="whitespace-pre-wrap leading-relaxed">
+                    {msg.content.split('```').map((part, index) => {
+                      // Kod blokları için özel stillendirme
+                      if (index % 2 === 1) {
+                        // Kod bloğu başlığını ayıklama
+                        const codeContent = part.trim();
+                        const firstLineEnd = codeContent.indexOf('\n');
+                        const header = firstLineEnd !== -1 ? codeContent.substring(0, firstLineEnd) : '';
+                        const actualCode = firstLineEnd !== -1 ? codeContent.substring(firstLineEnd + 1) : codeContent;
+                        
+                        let displayLang = 'Kod';
+                        const langMatch = header.match(/^(\w+):/);
+                        if (langMatch) {
+                          displayLang = langMatch[1].toUpperCase();
+                        } else {
+                           const simpleLangMatch = header.match(/^(\w+)/);
+                           if (simpleLangMatch) {
+                               displayLang = simpleLangMatch[1].toUpperCase();
+                           }
+                        }
+
+                        return (
+                          <div key={index} className="bg-gray-800 p-3 rounded my-2 text-xs font-mono overflow-x-auto border border-red-800">
+                            <div className="text-right text-red-400 mb-1 border-b border-gray-700 pb-1 pr-1 font-bold">{displayLang} ÇIKTISI</div>
+                            <pre className="whitespace-pre-wrap text-white">{actualCode}</pre>
+                          </div>
+                        );
+                      }
+                      return <span key={index}>{part}</span>;
+                    })}
+                  </div>
+                )}
+
+                {/* The "Aç" button - only shows if canvas is selected AND web code is present */}
+                {msg.role === 'ai' && extractCode(msg.content) && (selectedMode === 'canvas' || selectedMode === 'video') && (
+                  <button 
+                    onClick={() => {
+                      setCurrentCode(extractCode(msg.content));
+                      setShowPreview(true);
+                    }}
+                    className="mt-3 flex items-center gap-2 text-xs bg-red-600 hover:bg-red-500 px-3 py-1.5 rounded transition-colors shadow-md hover:shadow-lg text-white font-bold"
+                  >
+                    <Play size={14} />
+                    Canvas Önizleme (Aç)
+                  </button>
+                )}
+                {/* Non-Web Code Açıklaması */}
+                {msg.role === 'ai' && selectedMode === 'canvas' && getPrimaryCodeBlock(msg.content) && !extractCode(msg.content) && (
+                    <p className="mt-2 text-xs text-red-300 bg-gray-800 p-2 rounded border border-red-900">
+                        *Not: Üretilen kod ({getPrimaryCodeBlock(msg.content).language.toUpperCase()}) görselleştirme içermiyor veya tarayıcıda çalıştırılabilir HTML eşdeğeri üretilmedi. Kodu üst menüden kopyalayıp yerel ortamınızda çalıştırabilirsiniz.
+                    </p>
+                )}
+              </div>
+            </div>
+          ))}
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="bg-gray-900 p-4 rounded-2xl rounded-bl-none flex flex-col items-start gap-1 shadow-md border border-red-700">
+                <div className="flex items-center gap-3">
+                  <img src={logoUrl} alt="AI Logo" className="w-5 h-5 animate-spin" />
+                  <span className="text-sm font-bold text-gray-200">InfinityAI</span>
+                </div>
+                {currentStep && <span className="text-xs text-red-400 mt-1">{currentStep}</span>}
+              </div>
+            </div>
+          )}
+          {/* Scroll padding for the last message */}
+          <div className="h-4"></div> 
+        </div>
+
+        {/* Code Preview Panel - Tam Ekran Olacak */}
+        {showPreview && (
+          <div className="w-full bg-white border-l border-red-700 flex flex-col shadow-2xl animate-in slide-in-from-right duration-300">
+            <div className="bg-gray-100 p-3 flex justify-start items-center border-b border-gray-300">
+                {/* GERİ DÖN DÜĞMESİ */}
+                <button 
+                    onClick={() => setShowPreview(false)}
+                    className="flex items-center gap-2 p-2 text-white hover:bg-red-700 bg-red-600 rounded-lg transition-colors font-bold shadow-md"
+                >
+                    <ArrowLeft size={20} />
+                    <span>Sohbete Geri Dön</span>
+                </button>
+              <div className="flex items-center gap-2 text-gray-700 font-bold px-4">
+                <Code size={18} className="text-red-600" />
+                <span>Canlı Önizleme (Tarayıcı Simülasyonu)</span>
+              </div>
+            </div>
+            <div className="flex-1 bg-white relative">
+               <iframe 
+                 srcDoc={currentCode} 
+                 title="Preview"
+                 className="w-full h-full border-none"
+                 sandbox="allow-scripts allow-forms allow-modals"
+               />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Input Area and Mode Selector */}
+      <div className="p-4 bg-gray-900 border-t border-red-700">
+        
+        {/* Active Image Preview (Vision) */}
+        {imageUrl && (
+            <div className="max-w-4xl mx-auto mb-4 p-3 bg-gray-800 border border-red-700 rounded-xl flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                    <ImageIcon size={20} className="text-red-500 flex-shrink-0" />
+                    <span className="text-sm text-gray-300 font-medium">Görsel Analiz İçin Hazır:</span>
+                    <img src={imageUrl} alt="Preview" className="h-10 w-10 object-cover rounded border border-gray-600" />
+                </div>
+                <button 
+                    onClick={clearImage}
+                    className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors"
+                >
+                    <X size={16} />
+                    Kaldır
+                </button>
+            </div>
+        )}
+        
+        <div className="flex gap-3 max-w-4xl mx-auto mb-4 relative">
+            
+            {/* Mode Selector Button */}
+            <button 
+                onClick={() => setShowModeSelector(!showModeSelector)}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold transition-colors bg-red-700 text-white shadow-md border border-red-500 hover:bg-red-600"
+            >
+                <Zap size={18} /> 
+                Mod Seç: {getModeLabel(selectedMode)}
+            </button>
+            
+            {/* Mode Selector Dropdown/Modal */}
+            {showModeSelector && (
+                <div className="absolute bottom-full mb-2 w-full max-w-full bg-gray-800 border border-red-700 rounded-xl shadow-2xl z-20 overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-200">
+                    {modes.map(mode => (
+                        <button
+                            key={mode}
+                            onClick={() => handleModeSelect(mode)}
+                            className={`w-full text-left p-3 flex items-center justify-between text-sm transition-colors ${
+                                selectedMode === mode ? 'bg-red-700 text-white' : 'text-gray-200 hover:bg-gray-700'
+                            }`}
+                        >
+                            {getModeLabel(mode)}
+                            {selectedMode === mode && <Sparkles size={16} className="text-yellow-400" />}
+                            {mode === 'video' && <Film size={16} className="text-red-300" />}
+                            {mode === 'resim' && <ImageIcon size={16} className="text-red-300" />}
+                            {mode === 'canvas' && <Code size={16} className="text-red-300" />}
+                        </button>
+                    ))}
+                </div>
+            )}
+            
+            {/* Resim/Kamera Yükleme Butonları */}
+            <input 
+                type="file" 
+                ref={fileInputRef}
+                accept="image/*" 
+                onChange={handleImageUpload} 
+                className="hidden" 
+            />
+            <button 
+                onClick={() => fileInputRef.current.click()}
+                title="Resim Yükle (Vision Analizi)"
+                className="p-3 rounded-xl bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors"
+            >
+                <ImageIcon size={20} />
+            </button>
+             {/* Kamera Düğmesi - Aynı Girişi Tetikler */}
+            <button 
+                onClick={() => {
+                  fileInputRef.current.setAttribute('capture', 'environment'); // Kamerayı açmak için ipucu
+                  fileInputRef.current.click();
+                  fileInputRef.current.removeAttribute('capture'); // Sonra geri kaldır
+                }}
+                title="Kameradan Çek (Dosya Seçim Modu)"
+                className="p-3 rounded-xl bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors"
+            >
+                <Camera size={20} />
+            </button>
+        </div>
+        
+        <div className="flex gap-3 max-w-4xl mx-auto">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+            placeholder={`InfinityAI'ya bir şey yaz... (Mod: ${getModeLabel(selectedMode)})`}
+            className="flex-1 bg-gray-950 border border-gray-700 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-red-500 transition-all placeholder:text-gray-500"
+          />
+          <button 
+            onClick={handleSend}
+            disabled={isLoading || (!input.trim() && !imageData)}
+            className="bg-red-600 hover:bg-red-500 text-white p-3 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-500/30"
+          >
+            <Send size={24} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
